@@ -252,7 +252,7 @@ class WeatherCLI:
                 print(f"{date} | {bar_str} {val}{unit}")
 
     def display_forecast(self, location: Location, forecast_data: List[DailyForecast]) -> None:
-        """Formats and displays text data and visual ASCII charts."""
+        """Formats and displays forecast output (Detailed text for 1-day, ASCII graphs for weekly)."""
         country_suffix = f", {location.country}" if location.country else ""
         print("\n" + "=" * 55)
         print(f" Weather Forecast for {location.name}{country_suffix}")
@@ -260,7 +260,9 @@ class WeatherCLI:
 
         dates = [d.date for d in forecast_data]
 
-        for day in forecast_data:
+        # Case 1: Single Day Forecast - Detailed Text View
+        if len(forecast_data) == 1:
+            day = forecast_data[0]
             print(f"\n Date: {day.date}")
             print("-" * 35)
 
@@ -276,15 +278,20 @@ class WeatherCLI:
             if "precipitation_probability_max" in vals:
                 print(f"  Rain Chance:    {vals['precipitation_probability_max']}%")
 
-        # Visual Graphs Rendering (If multiple days are queried)
-        if len(forecast_data) > 1:
-            if "temperature_2m_max" in forecast_data[0].values:
-                max_temps: List[Optional[float]] = [d.values.get("temperature_2m_max") for d in forecast_data]
-                self._render_ascii_bar_chart("Max Temperature", dates, max_temps, "°C")
+        # Case 2: Multi-day (Weekly) Forecast - Graphs View Only
+        else:
+            metric_graph_info = {
+                "temperature_2m_max": ("Max Temperature", "°C"),
+                "apparent_temperature_max": ("Max Feels Like", "°C"),
+                "wind_speed_10m_max": ("Max Wind Speed", " km/h"),
+                "precipitation_sum": ("Total Precipitation", " mm"),
+                "precipitation_probability_max": ("Rain Probability", "%"),
+            }
 
-            if "precipitation_probability_max" in forecast_data[0].values:
-                rain_chances: List[Optional[float]] = [d.values.get("precipitation_probability_max") for d in forecast_data]
-                self._render_ascii_bar_chart("Rain Probability", dates, rain_chances, "%")
+            for key, (title, unit) in metric_graph_info.items():
+                if key in forecast_data[0].values:
+                    vals: List[Optional[float]] = [d.values.get(key) for d in forecast_data]
+                    self._render_ascii_bar_chart(title, dates, vals, unit)
 
         print("=" * 55 + "\n")
 
