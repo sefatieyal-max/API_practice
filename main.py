@@ -7,7 +7,7 @@ Example:
 """
 import sys
 
-from weather import main
+from weather_cli import main
 
 if __name__ == "__main__":
     sys.exit(main())

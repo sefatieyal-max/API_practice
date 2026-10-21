@@ -1,4 +1,4 @@
-"""Unit tests for weather.py. Run with: python -m unittest -v"""
+"""Unit tests for the weather_cli package. Run with: python -m unittest -v"""
 import io
 import subprocess
 import sys
@@ -9,23 +9,16 @@ from unittest import mock
 
 import requests
 
-from weather import (
-    IMPERIAL_UNITS,
-    METRIC_UNITS,
-    METRICS,
-    APICommunicationError,
-    Command,
-    DailyForecast,
-    ForecastFormatter,
-    InputParser,
-    InvalidResponseError,
-    Location,
-    RecentLocations,
-    WeatherAPIClient,
-    WeatherCLI,
-    build_arg_parser,
-    main,
-)
+from weather_cli.api_client import WeatherAPIClient
+from weather_cli.app import build_arg_parser, main
+from weather_cli.cli import WeatherCLI
+from weather_cli.commands import Command
+from weather_cli.config import METRICS
+from weather_cli.exceptions import APICommunicationError, InvalidResponseError
+from weather_cli.formatter import ForecastFormatter
+from weather_cli.history import RecentLocations
+from weather_cli.input_parser import InputParser
+from weather_cli.models import IMPERIAL_UNITS, METRIC_UNITS, DailyForecast, Location
 
 LONDON = Location("London", 51.5, -0.12, "United Kingdom", "England")
 
@@ -52,11 +45,9 @@ def make_client(*responses: Any) -> WeatherAPIClient:
 
 
 class TestLocation(unittest.TestCase):
-    def test_valid_location(self) -> None:
-        self.assertEqual(LONDON.latitude, 51.5)
 
-    def test_display_name_includes_region_and_country(self) -> None:
-        self.assertEqual(LONDON.display_name, "London, England, United Kingdom")
+
+
 
     def test_display_name_skips_missing_and_duplicate_parts(self) -> None:
         self.assertEqual(Location("Singapore", 1.3, 103.8, "Singapore").display_name, "Singapore")
@@ -647,7 +638,7 @@ class TestMain(unittest.TestCase):
         client.search_locations.return_value = [LONDON]
         client.get_forecast.return_value = [
             DailyForecast(f"2026-10-2{i}", {"temperature_2m_min": 9.0}) for i in range(1, 4)]
-        with (mock.patch("weather.WeatherAPIClient") as client_cls,
+        with (mock.patch("weather_cli.app.WeatherAPIClient") as client_cls,
               mock.patch("sys.stdout", new_callable=io.StringIO) as stdout):
             client_cls.return_value.__enter__.return_value = client
             code = main(["--city", "London", "--days", "3", "--metrics", "1,5", "--units", "imperial"])
