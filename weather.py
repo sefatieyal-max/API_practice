@@ -146,7 +146,7 @@ class WeatherAPIClient:
 # 5. CLI Presentation Layer
 # ==========================================
 class WeatherCLI:
-    """Manages CLI interaction, menu prompts, and output formatting."""
+    """Manages CLI interaction, menu prompts, ASCII graphs, and output formatting."""
 
     def __init__(self, client: WeatherAPIClient) -> None:
         self.client = client
@@ -173,12 +173,11 @@ class WeatherCLI:
         for idx, loc in enumerate(locations, start=1):
             country = f", {loc.country}" if loc.country else ""
             print(f"[{idx}] {loc.name}{country}")
-        print("[0] Cancel search")
+        print("[0] Back to City Search")
 
         while True:
             choice = input(f"Select location (0-{len(locations)}): ").strip()
             if choice == '0':
-                print("Search cancelled.\n")
                 return None
             if choice.isdigit() and 1 <= int(choice) <= len(locations):
                 return locations[int(choice) - 1]
@@ -190,7 +189,7 @@ class WeatherCLI:
         print("\nSelect Forecast Mode:")
         print("[1] Today's Forecast (1 Day)")
         print("[2] Weekly Forecast (7 Days)")
-        print("[0] Back / Cancel")
+        print("[0] Back to City Search")
 
         while True:
             choice = input("Enter choice (0-2): ").strip()
@@ -199,7 +198,6 @@ class WeatherCLI:
             if choice == "2":
                 return 7
             if choice == "0":
-                print("Action cancelled.\n")
                 return None
             print("Invalid choice. Please enter 0, 1, or 2.")
 
@@ -210,12 +208,11 @@ class WeatherCLI:
         for key, info in METRIC_OPTIONS.items():
             print(f"[{key}] {info['label']}")
         print("[A] All metrics")
-        print("[0] Cancel")
+        print("[0] Back to Forecast Mode Selection")
 
         while True:
             raw_input = input("Enter choices: ").strip().upper()
             if raw_input == "0":
-                print("Action cancelled.\n")
                 return None
 
             if raw_input == "A":
@@ -234,16 +231,36 @@ class WeatherCLI:
             print("Invalid selection. Please choose valid option numbers or 'A'.")
 
     @staticmethod
-    def display_forecast(location: Location, forecast_data: List[DailyForecast]) -> None:
-        """Formats and displays the forecast output."""
+    def _render_ascii_bar_chart(title: str, dates: List[str], values: List[Optional[float]], unit: str) -> None:
+        """Renders a simple ASCII horizontal bar chart for numerical visual analysis."""
+        valid_values = [v for v in values if v is not None]
+        if not valid_values:
+            return
+
+        print(f"\n--- Visual Graph: {title} ---")
+        max_val = max(valid_values, default=1.0)
+        scale_factor = 25 / max_val if max_val > 0 else 1.0
+
+        for date, val in zip(dates, values):
+            if val is None:
+                print(f"{date} | N/A")
+            else:
+                bar_length = int(val * scale_factor) if val > 0 else 0
+                bar_str = "█" * max(1, bar_length) if val > 0 else "▏"
+                print(f"{date} | {bar_str} {val}{unit}")
+
+    def display_forecast(self, location: Location, forecast_data: List[DailyForecast]) -> None:
+        """Formats and displays text data and visual ASCII charts."""
         country_suffix = f", {location.country}" if location.country else ""
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 55)
         print(f" Weather Forecast for {location.name}{country_suffix}")
-        print("=" * 50)
+        print("=" * 55)
+
+        dates = [d.date for d in forecast_data]
 
         for day in forecast_data:
             print(f"\n Date: {day.date}")
-            print("-" * 30)
+            print("-" * 35)
 
             vals = day.values
             if "temperature_2m_max" in vals and "temperature_2m_min" in vals:
@@ -257,10 +274,20 @@ class WeatherCLI:
             if "precipitation_probability_max" in vals:
                 print(f"  Rain Chance:    {vals['precipitation_probability_max']}%")
 
-        print("=" * 50 + "\n")
+        # Visual Graphs Rendering (If multiple days are queried)
+        if len(forecast_data) > 1:
+            if "temperature_2m_max" in forecast_data[0].values:
+                max_temps: List[Optional[float]] = [d.values.get("temperature_2m_max") for d in forecast_data]
+                self._render_ascii_bar_chart("Max Temperature", dates, max_temps, "°C")
+
+            if "precipitation_probability_max" in forecast_data[0].values:
+                rain_chances: List[Optional[float]] = [d.values.get("precipitation_probability_max") for d in forecast_data]
+                self._render_ascii_bar_chart("Rain Probability", dates, rain_chances, "%")
+
+        print("=" * 55 + "\n")
 
     def run(self) -> None:
-        """Main interaction loop."""
+        """Main interaction loop with state navigation."""
         print("=== Advanced Weather CLI ===")
         print("Type 'quit' or 'q' to exit.\n")
 
@@ -276,25 +303,28 @@ class WeatherCLI:
                 continue
 
             try:
-                # Step 1: Search location
+                # Step 1: Location Search
                 locations = self.client.search_locations(city_input, count=5)
                 selected_location = self._choose_location(city_input, locations)
                 if not selected_location:
-                    continue
+                    continue  # Goes back to entering a city
 
-                # Step 2: Select forecast timeframe (Today vs Weekly)
-                forecast_days = self._select_forecast_type()
-                if not forecast_days:
-                    continue
+                # Sub-loop to support back navigation between steps 2 & 3
+                while True:
+                    # Step 2: Forecast Timeframe Selection
+                    forecast_days = self._select_forecast_type()
+                    if forecast_days is None:
+                        break  # Back to Step 1 (City Search)
 
-                # Step 3: Select metrics
-                daily_params = self._select_metrics()
-                if not daily_params:
-                    continue
+                    # Step 3: Metrics Selection
+                    daily_params = self._select_metrics()
+                    if daily_params is None:
+                        continue  # Back to Step 2 (Forecast Timeframe Selection)
 
-                # Step 4: Fetch and display forecast
-                forecast = self.client.get_forecast(selected_location, daily_params, forecast_days)
-                self.display_forecast(selected_location, forecast)
+                    # Step 4: Fetch and Display
+                    forecast = self.client.get_forecast(selected_location, daily_params, forecast_days)
+                    self.display_forecast(selected_location, forecast)
+                    break  # Completed search, returns to main loop for next city query
 
             except APICommunicationError as err:
                 print(f"[Error] Network/API failure: {err}\n")
