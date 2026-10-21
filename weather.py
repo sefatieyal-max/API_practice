@@ -203,7 +203,7 @@ class WeatherCLI:
 
     @staticmethod
     def _select_metrics() -> Optional[List[str]]:
-        """Prompts user to select which weather metrics they wish to view."""
+        """Prompts user to select which weather metrics they wish to view with strict validation."""
         print("\nSelect the weather metrics you want to receive (e.g., '1,3' or 'A'):")
         for key, info in METRIC_OPTIONS.items():
             print(f"[{key}] {info['label']}")
@@ -221,14 +221,16 @@ class WeatherCLI:
                     selected_params.extend(info["daily_param"].split(","))
                 return selected_params
 
-            chosen_keys = [k.strip() for k in raw_input.split(",") if k.strip() in METRIC_OPTIONS]
-            if chosen_keys:
+            # Parse and strictly validate every comma-separated input token
+            raw_tokens = [token.strip() for token in raw_input.split(",") if token.strip()]
+
+            if raw_tokens and all(token in METRIC_OPTIONS for token in raw_tokens):
                 selected_params = []
-                for key in chosen_keys:
+                for key in raw_tokens:
                     selected_params.extend(METRIC_OPTIONS[key]["daily_param"].split(","))
                 return list(dict.fromkeys(selected_params))
 
-            print("Invalid selection. Please choose valid option numbers or 'A'.")
+            print("Invalid selection. Please choose valid option numbers (1-5), 'A' for all, or '0' to go back.")
 
     @staticmethod
     def _render_ascii_bar_chart(title: str, dates: List[str], values: List[Optional[float]], unit: str) -> None:
