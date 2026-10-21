@@ -1,6 +1,9 @@
 """Unit tests for weather.py. Run with: python -m unittest -v"""
 import io
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from typing import Any, List, Optional
 from unittest import mock
 
@@ -674,6 +677,14 @@ class TestMain(unittest.TestCase):
         self.assertEqual(args.days, 16)
         self.assertEqual(args.metrics, list(METRICS))
         self.assertEqual(args.units, "metric")
+
+class TestEntryPoint(unittest.TestCase):
+    def test_main_py_runs_help(self) -> None:
+        script = Path(__file__).with_name("main.py")
+        result = subprocess.run([sys.executable, str(script), "--help"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--city", result.stdout)
 
 if __name__ == "__main__":
     unittest.main()
