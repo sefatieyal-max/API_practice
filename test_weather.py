@@ -1,4 +1,5 @@
 """Unit tests for weather.py. Run with: python -m unittest -v"""
+import io
 import unittest
 from typing import Any, List, Optional
 from unittest import mock
@@ -6,16 +7,21 @@ from unittest import mock
 import requests
 
 from weather import (
+    IMPERIAL_UNITS,
+    METRIC_UNITS,
     METRICS,
     APICommunicationError,
+    Command,
     DailyForecast,
     ForecastFormatter,
     InputParser,
     InvalidResponseError,
     Location,
+    RecentLocations,
     WeatherAPIClient,
     WeatherCLI,
     build_arg_parser,
+    main,
 )
 
 LONDON = Location("London", 51.5, -0.12, "United Kingdom", "England")
@@ -78,10 +84,19 @@ class TestLocation(unittest.TestCase):
 
 
 class TestInputParser(unittest.TestCase):
-    def test_quit_words(self) -> None:
-        for word in ("q", "Q", " quit ", "EXIT"):
-            self.assertTrue(InputParser.is_quit(word))
-        self.assertFalse(InputParser.is_quit("Quito"))
+    def test_command_aliases(self) -> None:
+        expected = {"q": Command.QUIT, " QUIT ": Command.QUIT, "exit": Command.QUIT,
+                    "help": Command.HELP, "H": Command.HELP, "?": Command.HELP,
+                    "back": Command.BACK, "b": Command.BACK,
+                    "units": Command.UNITS, "Recent": Command.RECENT}
+        for raw, command in expected.items():
+            with self.subTest(raw=raw):
+                self.assertIs(InputParser.parse_command(raw), command)
+
+    def test_non_commands(self) -> None:
+        for raw in ("Quito", "0", "", "London", "helper"):
+            with self.subTest(raw=raw):
+                self.assertIsNone(InputParser.parse_command(raw))
 
     def test_city_name_is_trimmed_and_collapsed(self) -> None:
         self.assertEqual(InputParser.parse_city_name("  New   York "), "New York")
@@ -353,7 +368,9 @@ class TestForecastFormatter(unittest.TestCase):
             self.formatter.format_forecast(LONDON, [day], [])
 
 
-class TestWeatherCLI(unittest.TestCase):
+class ScriptedCLIMixin:
+    """Helpers that run WeatherCLI with scripted input and capture its output."""
+
     def run_cli(self, inputs: List[Any], client: Optional[mock.Mock] = None) -> List[str]:
         """Runs the CLI with scripted inputs and returns everything it printed."""
         self.client = client or mock.Mock(spec=WeatherAPIClient)
@@ -374,13 +391,15 @@ class TestWeatherCLI(unittest.TestCase):
     def single_day(self) -> List[DailyForecast]:
         return [DailyForecast("2026-10-21", {"temperature_2m_min": 9.0, "temperature_2m_max": 18.0})]
 
+
+class TestWeatherCLI(ScriptedCLIMixin, unittest.TestCase):
     def test_full_flow_with_multiple_matches(self) -> None:
         client = mock.Mock(spec=WeatherAPIClient)
         client.search_locations.return_value = [LONDON, Location("London", 42.98, -81.23, "Canada")]
         client.get_forecast.return_value = self.single_day()
         output = self.run_cli(["London", "1", "1", "1", "0", "q"], client)
         client.get_forecast.assert_called_once_with(
-            LONDON, ["temperature_2m_min", "temperature_2m_max"], 1)
+            LONDON, ["temperature_2m_min", "temperature_2m_max"], 1, METRIC_UNITS)
         self.assertIn("  Temperature:    9°C to 18°C", output)
         self.assertIn("[2] London, Canada", output)
         self.assertEqual(output[-1], "\nExiting application. Goodbye!")
@@ -455,6 +474,206 @@ class TestArgParser(unittest.TestCase):
             with self.subTest(raw=raw), mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                 build_arg_parser().parse_args(["--timeout", raw])
 
+
+
+class TestUnitsAndMetrics(unittest.TestCase):
+    def test_unit_for_each_kind(self) -> None:
+        self.assertEqual(METRIC_UNITS.unit_for("temperature"), "°C")
+        self.assertEqual(IMPERIAL_UNITS.unit_for("temperature"), "°F")
+        self.assertEqual(IMPERIAL_UNITS.unit_for("wind_speed"), "mph")
+        self.assertEqual(IMPERIAL_UNITS.unit_for("precipitation"), "inch")
+        self.assertEqual(IMPERIAL_UNITS.unit_for("percent"), "%")
+
+    def test_unknown_kind_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            METRIC_UNITS.unit_for("pressure")
+
+    def test_summary(self) -> None:
+        self.assertEqual(METRIC_UNITS.summary, "metric (°C, km/h, mm)")
+
+    def test_menu_label_follows_units(self) -> None:
+        self.assertEqual(METRICS["1"].menu_label(METRIC_UNITS), "Temperature (°C)")
+        self.assertEqual(METRICS["3"].menu_label(IMPERIAL_UNITS), "Max Wind Speed (mph)")
+
+    def test_get_forecast_sends_unit_params(self) -> None:
+        client = make_client(make_response(payload={"daily": {"time": ["2026-10-21"]}}))
+        client.get_forecast(LONDON, ["temperature_2m_max"], 1, IMPERIAL_UNITS)
+        _, kwargs = client._session.get.call_args
+        self.assertEqual(kwargs["params"]["temperature_unit"], "fahrenheit")
+        self.assertEqual(kwargs["params"]["wind_speed_unit"], "mph")
+        self.assertEqual(kwargs["params"]["precipitation_unit"], "inch")
+
+    def test_get_forecast_rejects_bad_units(self) -> None:
+        with self.assertRaises(TypeError):
+            make_client().get_forecast(LONDON, ["temperature_2m_max"], 1, "imperial")  # type: ignore[arg-type]
+
+    def test_imperial_formatting(self) -> None:
+        self.assertEqual(ForecastFormatter.format_value(70.0, "°F"), "70°F")
+        self.assertEqual(ForecastFormatter.format_value(0.02, "inch"), "0.02 inch")
+        day = DailyForecast("2026-10-21", {"wind_speed_10m_max": 8.0})
+        lines = ForecastFormatter().format_day_details(day, [METRICS["3"]], IMPERIAL_UNITS)
+        self.assertIn("  Max Wind Speed: 8 mph", lines)
+
+
+class TestRecentLocations(unittest.TestCase):
+    PARIS = Location("Paris", 48.85, 2.35, "France")
+    ROME = Location("Rome", 41.9, 12.5, "Italy")
+
+    def test_newest_first_and_moves_duplicates_to_front(self) -> None:
+        recent = RecentLocations()
+        for location in (LONDON, self.PARIS, LONDON):
+            recent.add(location)
+        self.assertEqual(recent.items, (LONDON, self.PARIS))
+
+    def test_trims_to_max_size(self) -> None:
+        recent = RecentLocations(max_size=2)
+        for location in (LONDON, self.PARIS, self.ROME):
+            recent.add(location)
+        self.assertEqual(recent.items, (self.ROME, self.PARIS))
+
+    def test_items_is_read_only_copy(self) -> None:
+        recent = RecentLocations()
+        recent.add(LONDON)
+        self.assertIsInstance(recent.items, tuple)
+
+    def test_invalid_arguments(self) -> None:
+        for size in (0, -1, True, 2.5):
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                RecentLocations(size)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            RecentLocations().add("London")  # type: ignore[arg-type]
+
+
+class TestCLICommands(ScriptedCLIMixin, unittest.TestCase):
+    """Global commands; uses the scripted-run helpers."""
+
+    def london_client(self) -> mock.Mock:
+        client = mock.Mock(spec=WeatherAPIClient)
+        client.search_locations.return_value = [LONDON]
+        client.get_forecast.return_value = self.single_day()
+        return client
+
+    def test_help_shows_commands_and_context_then_reprompts(self) -> None:
+        output = self.run_cli(["help", "?", "q"])
+        self.assertEqual(output.count("\nCommands (available at any prompt):"), 2)
+        self.assertIn("Here: Type a city name (e.g. 'London'), or 'recent' to pick a "
+                      "recently viewed city.\n", output)
+        self.assertEqual(output.count("\nEnter city name: "), 3)
+
+    def test_help_context_changes_per_prompt(self) -> None:
+        output = self.run_cli(["London", "h", "q"], self.london_client())
+        self.assertIn("Here: 1 shows today's detailed forecast, 2 shows 7-day charts.\n", output)
+
+    def test_units_toggle_changes_request_and_menu(self) -> None:
+        client = self.london_client()
+        output = self.run_cli(["units", "London", "1", "1", "q"], client)
+        self.assertIn("Units switched to imperial (°F, mph, inch).", output)
+        self.assertIn("[1] Temperature (°F)", output)
+        self.assertIs(client.get_forecast.call_args.args[3], IMPERIAL_UNITS)
+        self.assertIn("  Temperature:    9°F to 18°F", output)
+
+    def test_units_toggle_twice_returns_to_metric(self) -> None:
+        output = self.run_cli(["units", "units", "q"])
+        self.assertIn("Units switched to metric (°C, km/h, mm).", output)
+
+    def test_back_alias_works_like_zero(self) -> None:
+        client = self.london_client()
+        output = self.run_cli(["London", "1", "b", "back", "q"], client)
+        client.get_forecast.assert_not_called()
+        self.assertEqual(output.count("\nSelect Forecast Mode:"), 2)
+        self.assertEqual(output.count("\nEnter city name: "), 2)
+
+    def test_back_at_city_prompt_shows_notice(self) -> None:
+        output = self.run_cli(["back", "q"])
+        self.assertIn("[Notice] This is the first step. Type 'q' to exit.", output)
+
+    def test_recent_when_empty(self) -> None:
+        output = self.run_cli(["recent", "q"])
+        self.assertIn("[Notice] No recent cities yet.", output)
+
+    def test_recent_reuses_location_without_new_search(self) -> None:
+        client = self.london_client()
+        output = self.run_cli(["London", "0", "recent", "1", "1", "1", "q"], client)
+        self.assertIn("[1] London, England, United Kingdom", output)
+        client.search_locations.assert_called_once()
+        client.get_forecast.assert_called_once()
+
+    def test_recent_back_returns_to_city_prompt(self) -> None:
+        client = self.london_client()
+        self.run_cli(["London", "0", "recent", "0", "q"], client)
+        client.get_forecast.assert_not_called()
+
+
+class TestRunOnce(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = mock.Mock(spec=WeatherAPIClient)
+        self.client.search_locations.return_value = [LONDON, Location("London", 42.98, -81.23, "Canada")]
+        self.client.get_forecast.return_value = [
+            DailyForecast("2026-10-21", {"temperature_2m_min": 9.0, "temperature_2m_max": 18.0})]
+        self.output: List[str] = []
+        self.cli = WeatherCLI(self.client, output_func=self.output.append,
+                              input_func=lambda _: self.fail("must not prompt"))
+
+    def test_success_uses_best_match(self) -> None:
+        self.assertEqual(self.cli.run_once("London", 1, ["1"]), 0)
+        self.client.get_forecast.assert_called_once_with(
+            LONDON, ["temperature_2m_min", "temperature_2m_max"], 1, METRIC_UNITS)
+        self.assertIn("  Temperature:    9°C to 18°C", self.output)
+
+    def test_city_not_found(self) -> None:
+        self.client.search_locations.return_value = []
+        self.assertEqual(self.cli.run_once("Atlantis", 1, ["1"]), 1)
+        self.assertIn("[Error] City 'Atlantis' was not found.", self.output)
+
+    def test_invalid_city(self) -> None:
+        self.assertEqual(self.cli.run_once("1", 1, ["1"]), 1)
+        self.client.search_locations.assert_not_called()
+
+    def test_search_error(self) -> None:
+        self.client.search_locations.side_effect = APICommunicationError("offline")
+        self.assertEqual(self.cli.run_once("London", 1, ["1"]), 1)
+
+    def test_forecast_error(self) -> None:
+        self.client.get_forecast.side_effect = InvalidResponseError("bad")
+        self.assertEqual(self.cli.run_once("London", 1, ["1"]), 1)
+
+
+class TestMain(unittest.TestCase):
+    def test_non_interactive_mode_end_to_end(self) -> None:
+        client = mock.Mock(spec=WeatherAPIClient)
+        client.search_locations.return_value = [LONDON]
+        client.get_forecast.return_value = [
+            DailyForecast(f"2026-10-2{i}", {"temperature_2m_min": 9.0}) for i in range(1, 4)]
+        with (mock.patch("weather.WeatherAPIClient") as client_cls,
+              mock.patch("sys.stdout", new_callable=io.StringIO) as stdout):
+            client_cls.return_value.__enter__.return_value = client
+            code = main(["--city", "London", "--days", "3", "--metrics", "1,5", "--units", "imperial"])
+        self.assertEqual(code, 0)
+        self.assertIn("--- Min Temperature ---", stdout.getvalue())
+        client.get_forecast.assert_called_once_with(
+            LONDON,
+            ["temperature_2m_min", "temperature_2m_max", "precipitation_probability_max"],
+            3,
+            IMPERIAL_UNITS,
+        )
+
+    def test_days_or_metrics_without_city_is_an_error(self) -> None:
+        for argv in (["--days", "3"], ["--metrics", "1"]):
+            with self.subTest(argv=argv), mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                main(argv)
+
+    def test_invalid_flag_values(self) -> None:
+        bad = (["--days", "0"], ["--days", "17"], ["--days", "abc"], ["--metrics", "0"],
+               ["--metrics", "9"], ["--units", "kelvin"])
+        for argv in bad:
+            with self.subTest(argv=argv), mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                build_arg_parser().parse_args(["--city", "London", *argv])
+
+    def test_valid_flag_values(self) -> None:
+        args = build_arg_parser().parse_args(["--city", "Rome", "--days", "16", "--metrics", "a"])
+        self.assertEqual(args.days, 16)
+        self.assertEqual(args.metrics, list(METRICS))
+        self.assertEqual(args.units, "metric")
 
 if __name__ == "__main__":
     unittest.main()
